@@ -224,12 +224,12 @@ def test_setdefault_command(mutable_database, mutable_config):
 
 
 @pytest.mark.db
-def test_refresh_with_delete_tree_atomic_swap(mutable_database, mutable_config, tmpdir):
+def test_refresh_with_delete_tree_atomic_swap(mutable_database, mutable_config, tmp_path):
     """Test that refresh with --delete-tree uses atomic directory swap."""
     import glob
     
     # Configure modules to use a custom temporary directory
-    module_root = str(tmpdir.join("test_modules"))
+    module_root = str(tmp_path / "test_modules")
     data = {
         "default": {
             "enable": ["tcl"],

@@ -268,7 +268,7 @@ def rm(module_type, specs, args):
         s.remove()
 
 
-def _refresh_with_atomic_swap(module_type, module_type_root, writers, args):
+def _refresh_with_atomic_swap(module_type, module_type_root, module_set_name, cls, specs, args):
     """Regenerate module files using atomic directory swap to avoid downtime.
     
     This function builds all module files in a temporary directory, then
@@ -278,7 +278,9 @@ def _refresh_with_atomic_swap(module_type, module_type_root, writers, args):
     Args:
         module_type: the type of module system (e.g., "lmod", "tcl")
         module_type_root: the current root directory for module files
-        writers: list of module writers to generate files
+        module_set_name: name of the module set from configuration
+        cls: the module writer class
+        specs: list of specs to generate modules for
         args: command-line arguments
         
     Returns:
@@ -305,25 +307,31 @@ def _refresh_with_atomic_swap(module_type, module_type_root, writers, args):
         )
         tty.debug(f"Building modules in temporary directory: {temp_root}")
         
-        # Get module system name and module set name
-        module_system = module_type
-        module_set_name = args.module_set_name
-        
         # Override configuration to redirect module root to temp directory
         # This makes all writers build their files in temp_root instead of module_type_root
-        config_override = {
-            "modules": {
-                module_set_name: {
-                    "roots": {
-                        module_system: temp_root
-                    }
-                }
-            }
-        }
+        config_path = f"modules:{module_set_name}:roots:{module_type}"
         
         # Build all modules in the temporary directory
-        tty.msg(f"Building {len(writers)} module files in temporary location")
-        with spack.config.override(config_override):
+        tty.msg(f"Building module files in temporary location")
+        
+        # Temporarily override the module root path
+        # Save the original value to restore it later
+        config_path = f"modules:{module_set_name}:roots:{module_type}"
+        original_value = spack.config.get(config_path, None)
+        
+        try:
+            # Set the temp directory as the module root
+            spack.config.set(config_path, temp_root)
+            
+            # Recreate writers with the overridden configuration
+            writers = [
+                cls(spec, module_set_name) for spec in specs if spack.repo.PATH.exists(spec.name)
+            ]
+            # Filter excluded packages
+            writers = [x for x in writers if not x.conf.excluded]
+            
+            tty.msg(f"Building {len(writers)} module files")
+            
             # Generate module index in temp directory
             spack.modules.common.generate_module_index(
                 temp_root, writers, overwrite=True
@@ -339,6 +347,16 @@ def _refresh_with_atomic_swap(module_type, module_type_root, writers, args):
                 except Exception as e:
                     msg = f"{x.layout.filename}: {str(e)}"
                     errors.append(msg)
+        finally:
+            # Restore original configuration
+            if original_value is not None:
+                spack.config.set(config_path, original_value)
+            else:
+                # If there was no original value, remove the config we set
+                try:
+                    spack.config.remove(config_path)
+                except Exception:
+                    pass  # If removal fails, it's not critical
         
         # If there were errors but some modules were built, continue with swap
         # Users may want partial results
@@ -452,7 +470,9 @@ def refresh(module_type, specs, args):
     # Use atomic swap when doing a full refresh with --delete-tree
     # This prevents users from seeing "module not found" errors during rebuild
     if args.delete_tree and os.path.isdir(module_type_root):
-        errors = _refresh_with_atomic_swap(module_type, module_type_root, writers, args)
+        errors = _refresh_with_atomic_swap(
+            module_type, module_type_root, args.module_set_name, cls, specs, args
+        )
         if errors:
             errors.insert(0, color.colorize("@*{some module files could not be written}"))
             tty.warn("\n".join(errors))
