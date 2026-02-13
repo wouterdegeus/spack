@@ -474,10 +474,8 @@ def refresh(module_type, specs, args):
             tty.warn("\n".join(errors))
     else:
         # Original behavior for incremental updates or when directory doesn't exist
-        if args.delete_tree:
-            # Only delete if directory exists (no atomic swap in this path)
-            if os.path.isdir(module_type_root):
-                shutil.rmtree(module_type_root, ignore_errors=False)
+        # (no deletion needed here - if delete_tree was set with existing dir, 
+        # we'd be in the atomic swap path above)
         filesystem.mkdirp(module_type_root)
 
         # Dump module index after potentially removing module tree
