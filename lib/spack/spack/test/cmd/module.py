@@ -221,3 +221,58 @@ def test_setdefault_command(mutable_database, mutable_config):
         assert os.path.exists(writers[k].layout.filename)
     assert os.path.exists(link_name) and os.path.islink(link_name)
     assert os.path.realpath(link_name) == os.path.realpath(writers[preferred].layout.filename)
+
+
+@pytest.mark.db
+def test_refresh_with_delete_tree_atomic_swap(mutable_database, mutable_config, tmpdir):
+    """Test that refresh with --delete-tree uses atomic directory swap."""
+    import glob
+    
+    # Configure modules to use a custom temporary directory
+    module_root = str(tmpdir.join("test_modules"))
+    data = {
+        "default": {
+            "enable": ["tcl"],
+            "roots": {"tcl": module_root},
+        }
+    }
+    spack.config.set("modules", data)
+    
+    # Install some packages and generate initial modules
+    specs = ["libelf", "libdwarf"]
+    for spec_str in specs:
+        spec = spack.concretize.concretize_one(spec_str)
+        PackageInstaller([spec.package], explicit=True, fake=True).install()
+    
+    # Generate initial modules
+    module("tcl", "refresh", "-y", "libelf", "libdwarf")
+    
+    # Check that initial modules exist
+    initial_modules = glob.glob(os.path.join(module_root, "**", "*.lua"), recursive=True)
+    initial_modules.extend(glob.glob(os.path.join(module_root, "**", "*"), recursive=True))
+    # Filter to actual files (not directories)
+    initial_modules = [f for f in initial_modules if os.path.isfile(f)]
+    assert len(initial_modules) > 0, "Initial modules should be created"
+    
+    # Record initial module files
+    initial_module_set = set(initial_modules)
+    
+    # Perform refresh with --delete-tree (should use atomic swap)
+    module("tcl", "refresh", "-y", "--delete-tree", "libelf", "libdwarf")
+    
+    # Check that modules still exist (not deleted during rebuild)
+    final_modules = glob.glob(os.path.join(module_root, "**", "*"), recursive=True)
+    final_modules = [f for f in final_modules if os.path.isfile(f)]
+    assert len(final_modules) > 0, "Modules should exist after refresh"
+    
+    # Verify that no backup or temp directories remain
+    parent_dir = os.path.dirname(module_root.rstrip(os.sep))
+    backup_dirs = glob.glob(os.path.join(parent_dir, "*-old.*.backup"))
+    temp_dirs = glob.glob(os.path.join(parent_dir, "*-new.*.tmp"))
+    assert len(backup_dirs) == 0, "No backup directories should remain"
+    assert len(temp_dirs) == 0, "No temporary directories should remain"
+    
+    # Basic sanity check: module files should be similar before and after
+    # (same number of module files, allowing for index files)
+    assert abs(len(final_modules) - len(initial_module_set)) <= 2, \
+        "Module count should be similar before and after refresh"

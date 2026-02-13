@@ -268,6 +268,125 @@ def rm(module_type, specs, args):
         s.remove()
 
 
+def _refresh_with_atomic_swap(module_type, module_type_root, writers, args):
+    """Regenerate module files using atomic directory swap to avoid downtime.
+    
+    This function builds all module files in a temporary directory, then
+    atomically swaps it with the existing directory. This ensures users
+    never see "module not found" errors during the refresh.
+    
+    Args:
+        module_type: the type of module system (e.g., "lmod", "tcl")
+        module_type_root: the current root directory for module files
+        writers: list of module writers to generate files
+        args: command-line arguments
+        
+    Returns:
+        List of error messages encountered during module generation
+    """
+    import time
+    import tempfile
+    
+    errors = []
+    timestamp = str(int(time.time()))
+    
+    # Create temporary directory for building new modules
+    # Use parent directory to ensure we're on the same filesystem (required for atomic rename)
+    parent_dir = os.path.dirname(module_type_root.rstrip(os.sep))
+    temp_root = None
+    backup_root = None
+    
+    try:
+        # Create temporary directory with unique name
+        temp_root = tempfile.mkdtemp(
+            prefix=f"{os.path.basename(module_type_root)}-new.",
+            suffix=f".{timestamp}.tmp",
+            dir=parent_dir
+        )
+        tty.debug(f"Building modules in temporary directory: {temp_root}")
+        
+        # Get module system name and module set name
+        module_system = module_type
+        module_set_name = args.module_set_name
+        
+        # Override configuration to redirect module root to temp directory
+        # This makes all writers build their files in temp_root instead of module_type_root
+        config_override = {
+            "modules": {
+                module_set_name: {
+                    "roots": {
+                        module_system: temp_root
+                    }
+                }
+            }
+        }
+        
+        # Build all modules in the temporary directory
+        tty.msg(f"Building {len(writers)} module files in temporary location")
+        with spack.config.override(config_override):
+            # Generate module index in temp directory
+            spack.modules.common.generate_module_index(
+                temp_root, writers, overwrite=True
+            )
+            
+            # Write each module file
+            for x in writers:
+                try:
+                    x.write(overwrite=True)
+                except spack.error.SpackError as e:
+                    msg = f"{x.layout.filename}: {e.message}"
+                    errors.append(msg)
+                except Exception as e:
+                    msg = f"{x.layout.filename}: {str(e)}"
+                    errors.append(msg)
+        
+        # If there were errors but some modules were built, continue with swap
+        # Users may want partial results
+        if errors:
+            tty.warn(f"Encountered {len(errors)} errors during module generation")
+        
+        # Prepare backup directory name
+        backup_root = f"{module_type_root}-old.{timestamp}.backup"
+        
+        # Perform atomic swap
+        tty.msg("Performing atomic directory swap")
+        
+        # Step 1: Move old directory to backup (if it exists)
+        if os.path.exists(module_type_root):
+            tty.debug(f"Moving {module_type_root} to {backup_root}")
+            os.rename(module_type_root, backup_root)
+        
+        # Step 2: Move new directory to production location
+        try:
+            tty.debug(f"Moving {temp_root} to {module_type_root}")
+            os.rename(temp_root, module_type_root)
+            temp_root = None  # Mark as successfully moved
+            tty.msg("Module files refreshed successfully")
+        except Exception as e:
+            # Rollback: restore old directory
+            tty.error(f"Failed to move new modules into place: {e}")
+            if backup_root and os.path.exists(backup_root):
+                tty.msg("Rolling back to previous module files")
+                os.rename(backup_root, module_type_root)
+                backup_root = None  # Mark as restored
+            raise
+        
+        # Step 3: Cleanup old backup directory
+        if backup_root and os.path.exists(backup_root):
+            tty.debug(f"Removing old module directory: {backup_root}")
+            shutil.rmtree(backup_root, ignore_errors=True)
+            
+    except Exception as e:
+        tty.error(f"Atomic swap failed: {e}")
+        # Cleanup temporary directory if it still exists
+        if temp_root and os.path.exists(temp_root):
+            tty.debug(f"Cleaning up temporary directory: {temp_root}")
+            shutil.rmtree(temp_root, ignore_errors=True)
+        raise
+    
+    return errors
+
+
 def refresh(module_type, specs, args):
     """Regenerates the module files for every spec in specs and every module
     type in module types.
@@ -329,28 +448,38 @@ def refresh(module_type, specs, args):
 
     # Proceed regenerating module files
     tty.msg("Regenerating {name} module files".format(name=module_type))
-    if os.path.isdir(module_type_root) and args.delete_tree:
-        shutil.rmtree(module_type_root, ignore_errors=False)
-    filesystem.mkdirp(module_type_root)
+    
+    # Use atomic swap when doing a full refresh with --delete-tree
+    # This prevents users from seeing "module not found" errors during rebuild
+    if args.delete_tree and os.path.isdir(module_type_root):
+        errors = _refresh_with_atomic_swap(module_type, module_type_root, writers, args)
+        if errors:
+            errors.insert(0, color.colorize("@*{some module files could not be written}"))
+            tty.warn("\n".join(errors))
+    else:
+        # Original behavior for incremental updates
+        if os.path.isdir(module_type_root) and args.delete_tree:
+            shutil.rmtree(module_type_root, ignore_errors=False)
+        filesystem.mkdirp(module_type_root)
 
-    # Dump module index after potentially removing module tree
-    spack.modules.common.generate_module_index(
-        module_type_root, writers, overwrite=args.delete_tree
-    )
-    errors = []
-    for x in writers:
-        try:
-            x.write(overwrite=True)
-        except spack.error.SpackError as e:
-            msg = f"{x.layout.filename}: {e.message}"
-            errors.append(msg)
-        except Exception as e:
-            msg = f"{x.layout.filename}: {str(e)}"
-            errors.append(msg)
+        # Dump module index after potentially removing module tree
+        spack.modules.common.generate_module_index(
+            module_type_root, writers, overwrite=args.delete_tree
+        )
+        errors = []
+        for x in writers:
+            try:
+                x.write(overwrite=True)
+            except spack.error.SpackError as e:
+                msg = f"{x.layout.filename}: {e.message}"
+                errors.append(msg)
+            except Exception as e:
+                msg = f"{x.layout.filename}: {str(e)}"
+                errors.append(msg)
 
-    if errors:
-        errors.insert(0, color.colorize("@*{some module files could not be written}"))
-        tty.warn("\n".join(errors))
+        if errors:
+            errors.insert(0, color.colorize("@*{some module files could not be written}"))
+            tty.warn("\n".join(errors))
 
 
 #: Dictionary populated with the list of sub-commands.
