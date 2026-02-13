@@ -307,10 +307,6 @@ def _refresh_with_atomic_swap(module_type, module_type_root, module_set_name, cl
         )
         tty.debug(f"Building modules in temporary directory: {temp_root}")
         
-        # Override configuration to redirect module root to temp directory
-        # This makes all writers build their files in temp_root instead of module_type_root
-        config_path = f"modules:{module_set_name}:roots:{module_type}"
-        
         # Build all modules in the temporary directory
         tty.msg(f"Building module files in temporary location")
         

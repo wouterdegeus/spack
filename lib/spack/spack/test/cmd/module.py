@@ -247,9 +247,8 @@ def test_refresh_with_delete_tree_atomic_swap(mutable_database, mutable_config, 
     # Generate initial modules
     module("tcl", "refresh", "-y", "libelf", "libdwarf")
     
-    # Check that initial modules exist
-    initial_modules = glob.glob(os.path.join(module_root, "**", "*.lua"), recursive=True)
-    initial_modules.extend(glob.glob(os.path.join(module_root, "**", "*"), recursive=True))
+    # Check that initial modules exist (find all files, not just .lua)
+    initial_modules = glob.glob(os.path.join(module_root, "**", "*"), recursive=True)
     # Filter to actual files (not directories)
     initial_modules = [f for f in initial_modules if os.path.isfile(f)]
     assert len(initial_modules) > 0, "Initial modules should be created"
@@ -273,6 +272,7 @@ def test_refresh_with_delete_tree_atomic_swap(mutable_database, mutable_config, 
     assert len(temp_dirs) == 0, "No temporary directories should remain"
     
     # Basic sanity check: module files should be similar before and after
-    # (same number of module files, allowing for index files)
-    assert abs(len(final_modules) - len(initial_module_set)) <= 2, \
+    # Allow small difference to account for module-index.yaml and other metadata files
+    MAX_FILE_COUNT_DIFF = 2
+    assert abs(len(final_modules) - len(initial_module_set)) <= MAX_FILE_COUNT_DIFF, \
         "Module count should be similar before and after refresh"
